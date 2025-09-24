@@ -9,8 +9,9 @@ db_lock = asyncio.Lock()
 
 def init_db():
     with sqlite3.connect(DB_FILE, timeout=120) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout = 120000")
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")   # швидше, ніж FULL
+        conn.execute("PRAGMA busy_timeout = 120000") # 120 секунд очікування
         c = conn.cursor()
         c.execute(
             """CREATE TABLE IF NOT EXISTS accounts (
@@ -243,7 +244,7 @@ async def with_db_connection(query, params=(), fetchone=False, fetchall=False, m
                 if "locked" in str(e).lower() and attempt < retries - 1:
                     logger.warning(f"[DB] Locked, retry {attempt+1}/{retries} ...")
                     await asyncio.sleep(delay)
-                    delay *= 2  # експоненційний бекоф
+                    delay *= 2
                     continue
                 logger.error(f"[DB] SQLite error: {e}")
                 raise

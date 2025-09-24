@@ -1,7 +1,9 @@
 # main.py
+import logging
 import os
 import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TimedOut
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -28,29 +30,31 @@ from handlers import (
     manual_view, handle_view_link,
     add_auto_comments, set_auto_comments, handle_auto_chat_id_comments, cancel_auto_comments,
     remove_auto_comments, confirm_remove_auto_comments, manage_auto_comments, handle_poll_link, handle_poll_accounts,
-    handle_view_accounts_count, choose_auto_mode, AUTO_REACTION_COUNTS, AUTO_REACTION_RANDOM_FILL,
+    handle_view_accounts_count, choose_auto_mode,
     finalize_manual_reactions, set_manual_counts
 )
-from config import BOT_TOKEN, BOT_NAME
+from config import (BOT_TOKEN, BOT_NAME, CHANNEL_ID, INVITE_LINK, CHAT_ID, AUTO_CHAT_ID, AUTO_REACTION,
+                    VIEW_LINK, POLL_ACCOUNTS, POLL_OPTION, POLL_LINK, COMMENTS_TEXT, COMMENTS_LANGUAGE,
+                    COMMENTS_CHAT_ID, SETTINGS_VALUES, SETTINGS_CHAT_ID, AUTO_COMMENTS, PROXY_DETAILS,
+                    PROXY_TYPE, UNSUB_CHANNEL_ID, AUTO_REACTION_COUNTS, AUTO_REACTION_RANDOM_FILL, REACTION_INPUT,
+                    )
 from telegram_client import load_existing_sessions
-from utils import logger
+from utils import logger, TelegramHandler
 from auto_manager import auto_manager
 
-INVITE_LINK, CHAT_ID, AUTO_CHAT_ID, AUTO_REACTION, REACTION_INPUT, UNSUB_CHANNEL_ID, PROXY_TYPE, PROXY_DETAILS, AUTO_COMMENTS = range(9)
-SETTINGS_CHAT_ID, SETTINGS_VALUES = range(2)
-COMMENTS_CHAT_ID, COMMENTS_LANGUAGE, COMMENTS_TEXT = range(3)
-POLL_LINK, POLL_OPTION, POLL_ACCOUNTS = range(3)
-PROXY_TYPE, PROXY_DETAILS = range(2)
-UNSUB_CHANNEL_ID = 0
-VIEW_LINK = 0
-
-import asyncio
-from telegram.error import TimedOut
-
 async def startup(application: Application):
-    init_db()
+    init_db()  # ініціалізація бази даних
     await auto_manager.start_clients()
     await check_and_remove_duplicate_subscriptions()
+
+    # Ініціалізація бота для Telegram
+    bot = application.bot
+
+    # Налаштовуємо TelegramHandler для відправки повідомлень
+    telegram_handler = TelegramHandler(bot, CHANNEL_ID)
+    telegram_handler.setLevel(logging.DEBUG)
+    logger.addHandler(telegram_handler)
+
     max_retries = 5
     for attempt in range(max_retries):
         try:

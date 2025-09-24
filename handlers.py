@@ -31,28 +31,12 @@ from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInv
 from telethon.tl.types import ChatInvite, ChatInviteAlready
 from telethon.errors import ChannelInvalidError, ChannelPrivateError, InviteHashExpiredError, InviteRequestSentError, UserAlreadyParticipantError
 import re
-
-
-PROXY_TYPE, PROXY_DETAILS = range(2)
-INVITE_LINK, CHAT_ID = range(2)
-REACTION_INPUT = 0
-UNSUB_CHANNEL_ID = 0
-AUTO_REACTION_CHAT_ID, AUTO_REACTION_SET = range(100, 102)  # Unique range for auto_reactions
-AUTO_COMMENT_CHAT_ID, AUTO_COMMENT_SET = range(200, 202)   # Unique range for auto_comments
-SETTINGS_CHAT_ID, SETTINGS_VALUES = range(2)
-COMMENTS_CHAT_ID, COMMENTS_LANGUAGE, COMMENTS_TEXT = range(3)
-POLL_LINK, POLL_OPTION, POLL_ACCOUNTS = range(3)
-AUTO_REACTION_COUNTS, AUTO_REACTION_RANDOM_FILL = range(102, 104)
-
-VIEW_LINK = 0
-
 from telegram.ext import ConversationHandler
-
-from telegram.ext import ConversationHandler
-
-from telegram.ext import ConversationHandler
-
-from telegram.ext import ConversationHandler
+from config import (BOT_TOKEN, BOT_NAME, CHANNEL_ID, INVITE_LINK, CHAT_ID, AUTO_CHAT_ID, AUTO_REACTION,
+                    VIEW_LINK, POLL_ACCOUNTS, POLL_OPTION, POLL_LINK, COMMENTS_TEXT, COMMENTS_LANGUAGE,
+                    COMMENTS_CHAT_ID, SETTINGS_VALUES, SETTINGS_CHAT_ID, AUTO_COMMENTS, PROXY_DETAILS,
+                    PROXY_TYPE, UNSUB_CHANNEL_ID, AUTO_REACTION_COUNTS, AUTO_REACTION_RANDOM_FILL, REACTION_INPUT,
+                    )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
@@ -71,11 +55,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("View History", callback_data="view_history")],
         [InlineKeyboardButton("Reaction Info", callback_data="reaction_info")],
         [InlineKeyboardButton("Manage Auto-Reactions", callback_data="manage_auto_reactions")],
-        [InlineKeyboardButton("Manage Auto-Comments", callback_data="manage_auto_comments")],
-        [InlineKeyboardButton("Set Manual Settings", callback_data="set_settings")],
-        [InlineKeyboardButton("Manage Comments", callback_data="manage_comments")],
-        [InlineKeyboardButton("Manual Vote", callback_data="manual_vote")],
-        [InlineKeyboardButton("Manual View", callback_data="manual_view")],
+        # [InlineKeyboardButton("Manage Auto-Comments", callback_data="manage_auto_comments")],
+        # [InlineKeyboardButton("Set Manual Settings", callback_data="set_settings")],
+        # [InlineKeyboardButton("Manage Comments", callback_data="manage_comments")],
+        # [InlineKeyboardButton("Manual Vote", callback_data="manual_vote")],
+        # [InlineKeyboardButton("Manual View", callback_data="manual_view")],
         [InlineKeyboardButton("Add Proxy", callback_data="add_proxy")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -205,6 +189,7 @@ async def process_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             account_id = account_id[0] + 1 if account_id else 1
             async with client_connection_lock:
                 client = await get_client(session_file, account_id, single_proxy)
+
                 if client:
                     try:
                         me = await client.get_me()
@@ -540,8 +525,7 @@ async def handle_sub_link(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if total_accounts == 0:
         await update.message.reply_text(
             "No accounts available for subscription.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="start")]])
-        )
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="start")]]))
         return ConversationHandler.END
 
     status_msg = await update.message.reply_text(
@@ -571,8 +555,7 @@ async def handle_sub_link(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not invite:
             await update.message.reply_text(
                 "No valid account could resolve this invite link (all frozen/restricted).",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="start")]])
-            )
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="start")]]))
             return ConversationHandler.END
 
         if isinstance(invite, ChatInviteAlready):
@@ -597,8 +580,7 @@ async def handle_sub_link(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             logger.error(f"Unexpected invite type for link {input_text}: {type(invite)}")
             await update.message.reply_text(
                 "Error processing invite link: Invalid response from Telegram. Try again or /cancel.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="start")]])
-            )
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="start")]]))
             return ConversationHandler.END
     else:
         chat_id = normalize_chat_id(input_text)
@@ -613,9 +595,42 @@ async def handle_sub_link(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             continue
 
         client = auto_manager.clients.get(account_id)
-        if not client or not client.is_connected():
-            logger.warning(f"Client not active for account {account_id}, skipping.")
-            continue
+
+        # Перевірка на наявність активного клієнта для цього акаунта
+        if not client:
+            logger.warning(f"No client found for account {account_id}, creating a new client.")
+            session_path, = await with_db_connection(
+                "SELECT session_path FROM accounts WHERE id = ?", (account_id,), fetchone=True
+            )
+            client = await get_client(session_path, account_id)
+            if not client:
+                logger.error(f"Failed to create a client for account {account_id}.")
+                continue
+        else:
+            # Перевіряємо, чи клієнт підключений
+            if not client.is_connected():
+                logger.warning(f"Client for account {account_id} is not connected. Attempting to reconnect.")
+                try:
+                    await client.connect()  # Спроба реконекту
+                    if not await client.is_user_authorized():  # Якщо після реконекту клієнт не авторизований
+                        logger.warning(f"Account {account_id} could not reconnect (not authorized).")
+                        continue  # Якщо не вдалося авторизувати, пропускаємо акаунт
+                    logger.info(f"Account {account_id} reconnected successfully.")
+                except Exception as reconnect_error:
+                    logger.error(f"Failed to reconnect account {account_id}: {reconnect_error}")
+                    continue  # Не продовжуємо, якщо реконект не вдався
+
+        if not client.is_connected():
+            logger.warning(f"Client not connected for account {account_id}, attempting to reconnect.")
+            try:
+                await client.connect()
+                if not await client.is_user_authorized():
+                    logger.warning(f"Account {account_id} could not reconnect (not authorized).")
+                    continue
+                logger.info(f"Account {account_id} reconnected successfully.")
+            except Exception as reconnect_error:
+                logger.warning(f"Failed to reconnect account {account_id}: {reconnect_error}")
+                continue
 
         try:
             if is_invite_link:
@@ -697,13 +712,25 @@ async def handle_sub_link(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         await status_msg.edit_text(
             final_text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="start")]])
-        )
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="start")]]))
     except Exception as e:
         if "Message is not modified" not in str(e):
             logger.error(f"Failed to edit final status message: {str(e)}")
 
     return ConversationHandler.END
+
+
+async def retry_with_backoff(func, max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            return await func()
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e):
+                logger.warning(f"Database locked, retrying... (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(2 ** attempt)  # Експоненціальна затримка
+                continue
+            raise
+
 
 
 async def handle_sub_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

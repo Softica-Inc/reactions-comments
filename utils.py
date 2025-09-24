@@ -3,47 +3,88 @@ import os
 import json
 import logging
 import time
+import traceback
 import aiohttp
 import os
+from dotenv import load_dotenv
 from config import PPLX_API_KEY
 import unicodedata
 import socks
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
-
 from telethon.tl.functions.channels import LeaveChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
-
 from config import LOGS_DIR, PROXY_FILE
-from telethon.errors import RPCError
-from telethon.errors.rpcerrorlist import UserAlreadyParticipantError, ChatAdminRequiredError
-from telethon.errors.rpcerrorlist import MessageNotModifiedError
+import os
+import time
+from logging.handlers import RotatingFileHandler
+from telegram import Bot
+from telegram.error import TelegramError
+from dotenv import load_dotenv
+from datetime import datetime
+import traceback
+import logging
+from telegram import Bot
+from telegram.error import TelegramError
 
-# Setup logging
-os.makedirs(LOGS_DIR, exist_ok=True)
-log_file = os.path.join(LOGS_DIR, f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        RotatingFileHandler(log_file, maxBytes=1048576, backupCount=0, encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
+import asyncio
 
-# Suppress HTTP request logs from telegram and httpx
-logging.getLogger("telegram").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
+class TelegramHandler(logging.Handler):
+    def __init__(self, bot: Bot, channel_id: str):
+        super().__init__()
+        self.bot = bot
+        self.channel_id = channel_id
+
+    def emit(self, record):
+        # Пропускаємо DEBUG та INFO, обробляємо тільки WARNING та ERROR
+        if record.levelno < logging.WARNING:
+            return
+
+        log_entry = self.format(record)
+
+        # Якщо рівень помилки - додаємо теги
+        if record.levelno == logging.ERROR:
+            level_name = "ERROR"
+            message = f"Bot: @{self.bot.username}\nLevel: {level_name}\n{log_entry}\n@softica_perceus @ystwa"
+        else:  # Якщо рівень WARNING - не додаємо теги
+            level_name = "WARNING"
+            message = f"Bot: @{self.bot.username}\nLevel: {level_name}\n{log_entry}"
+
+        try:
+            # Використовуємо asyncio.create_task, замість asyncio.run
+            asyncio.create_task(self._send_to_telegram(message))
+        except TelegramError as e:
+            print(f"Failed to send message to Telegram channel: {e}")
+            print(f"Failed message: {log_entry}")
+
+    async def _send_to_telegram(self, message: str):
+        try:
+            await self.bot.send_message(chat_id=self.channel_id, text=message)
+            print(f"Sent log to Telegram channel: {message}")
+        except Exception as e:
+            print(f"Error sending message: {str(e)}")
+
+
+# Ініціалізація логера
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Для тесту встановлюємо рівень DEBUG
 
-class ConsoleFilter(logging.Filter):
-    def filter(self, record):
-        return "Bot started successfully" in record.msg or "ReactionBot" in record.msg
-
+# Створення обробників логування (файл та консоль)
+file_handler = logging.FileHandler('logs/bot.log')
 console_handler = logging.StreamHandler()
-console_handler.addFilter(ConsoleFilter())
-logger.handlers = [RotatingFileHandler(log_file, maxBytes=1048576, backupCount=0, encoding="utf-8"), console_handler]
+
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# Налаштування рівня логування для Telegram
+logging.getLogger("telegram").setLevel(logging.DEBUG)
+logging.getLogger("httpx").setLevel(logging.DEBUG)
+
 
 def normalize_emoji(emoji: str) -> str:
     return unicodedata.normalize('NFC', emoji.strip())
@@ -77,7 +118,7 @@ def load_proxies():
                     logger.warning(f"Proxy file {PROXY_FILE} is empty, initializing as empty list")
                     return []
                 proxies = json.loads(content)
-                logger.info(f"Loaded proxies: {proxies}")
+                # logger.info(f"Loaded proxies: {proxies}")
                 if proxies is None:
                     logger.warning(f"Proxy file {PROXY_FILE} contains null, initializing as empty list")
                     return []
@@ -166,8 +207,6 @@ def normalize_chat_id(chat_id):
 
 async def view_post(client, peer, msg_id):
     await client.get_messages(peer, ids=msg_id)
-
-
 
 
 async def generate_comments_binary_options(count: int = 15) -> list:

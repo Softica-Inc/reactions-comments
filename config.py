@@ -9,6 +9,7 @@ BOT_NAME = os.getenv("BOT_NAME")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH")
+CHANNEL_ID = "-1003097486758"
 
 # Paths
 DB_FILE = os.getenv("DB_FILE", "bot_data.db")
@@ -38,7 +39,36 @@ VIEW_ACCOUNTS_MIN = int(os.getenv("VIEW_ACCOUNTS_MIN", "8"))
 VIEW_ACCOUNTS_MAX = int(os.getenv("VIEW_ACCOUNTS_MAX", "10"))
 
 # Static constants
-INVITE_LINK, CHAT_ID, AUTO_CHAT_ID, AUTO_REACTION, REACTION_INPUT, UNSUB_CHANNEL_ID, PROXY_TYPE, PROXY_DETAILS, AUTO_COMMENTS = range(9)
+# Subscriptions
+INVITE_LINK, CHAT_ID = range(100, 102)
+# Auto reactions
+AUTO_CHAT_ID, AUTO_REACTION = range(200, 202)
+AUTO_REACTION_COUNTS, AUTO_REACTION_RANDOM_FILL = range(202, 204)
+
+# Manual reactions
+REACTION_INPUT = 300
+
+# Unsubscribe
+UNSUB_CHANNEL_ID = 400
+
+# Proxy
+PROXY_TYPE, PROXY_DETAILS = range(500, 502)
+
+# Auto comments
+AUTO_COMMENTS = 600
+AUTO_COMMENT_CHAT_ID, AUTO_COMMENT_SET = range(601, 603)
+
+# Settings
+SETTINGS_CHAT_ID, SETTINGS_VALUES = range(700, 702)
+
+# Comments
+COMMENTS_CHAT_ID, COMMENTS_LANGUAGE, COMMENTS_TEXT = range(800, 803)
+
+# Polls
+POLL_LINK, POLL_OPTION, POLL_ACCOUNTS = range(900, 903)
+
+# Views
+VIEW_LINK = 1000
 
 DEFAULT_COMMENTS = [
     "Great post!",

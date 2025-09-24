@@ -22,6 +22,8 @@ import patoolib
 session_lock = asyncio.Lock()
 client_connection_lock = asyncio.Lock()
 
+db_lock = asyncio.Lock()  # для доступу до бази даних
+
 async def extract_archive(archive_path, extract_dir):
     os.makedirs(extract_dir, exist_ok=True)
     try:
@@ -39,7 +41,6 @@ async def extract_archive(archive_path, extract_dir):
         logger.error(f"Failed to extract {archive_path}: {str(e)}")
         return False
 
-
 def get_session_files(directory):
     session_files = []
     for root, _, files in os.walk(directory):
@@ -47,7 +48,6 @@ def get_session_files(directory):
             if file.endswith(".session"):
                 session_files.append(os.path.join(root, file))
     return session_files
-
 
 def proxy_to_requests(proxy):
     """
@@ -67,7 +67,7 @@ def proxy_to_requests(proxy):
     return None
 
 
-
+active_clients = {}
 
 async def get_client(session_path, account_id=None, proxy=None):
     from telethon import TelegramClient
@@ -84,7 +84,7 @@ async def get_client(session_path, account_id=None, proxy=None):
     proxies = load_proxies()
     proxy_index = 0
 
-    # ===== 1. Якщо задано proxy з rotate_url → викликаємо API для ротації мобільного IP =====
+    # Функція для ротації мобільного проксі
     def rotate_mobile_proxy(p):
         try:
             if isinstance(p, dict) and p.get("rotate_url"):
@@ -93,13 +93,26 @@ async def get_client(session_path, account_id=None, proxy=None):
         except Exception as e:
             logger.error(f"Failed to rotate mobile proxy {p}: {e}")
 
-    # ===== 2. Додаємо session-id для backconnect проксі =====
+    # Функція для додавання session-id для backconnect проксі
     def with_random_session_id(p):
         if isinstance(p, dict) and p.get("username"):
             sid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
             p = dict(p)  # робимо копію
             p["username"] = f"{p['username']}-session-{sid}"
         return p
+
+    if account_id in active_clients:
+        client = active_clients[account_id]
+        # if not await client.is_connected():
+        if not client.is_connected():
+            logger.warning(f"Account {account_id} marked as connected, but client is disconnected. Reconnecting...")
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.warning(f"Account {account_id} not authorized after reconnect. Removing client.")
+                await client.disconnect()
+                del active_clients[account_id]
+                return None
+        return client
 
     if proxy is None:
         if proxies:
@@ -129,45 +142,38 @@ async def get_client(session_path, account_id=None, proxy=None):
         proxy = (proxy_type, proxy["host"], int(proxy["port"]), proxy.get("username"), proxy.get("password"))
 
     for attempt in range(max_retries):
-        async with session_lock:
+        async with session_lock:  # Блокування доступу до сесії
             try:
                 client = TelegramClient(session_path, API_ID, API_HASH, proxy=proxy)
                 logger.info(f"[{attempt+1}/{max_retries}] Connecting client for {session_path} with proxy {proxy}")
                 await asyncio.wait_for(client.connect(), timeout=CLIENT_CONNECTION_TIMEOUT)
 
-                # ===== Перевірка авторизації =====
+                # Перевірка авторизації
                 authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=CLIENT_CONNECTION_TIMEOUT)
                 if not authorized:
                     session_dir = os.path.dirname(session_path)
                     password_file = os.path.join(session_dir, "pass.txt")
 
-                    # Якщо є файл з паролем → пробуємо тільки у випадку, якщо акаунт вже колись логінився
+                    # Якщо є файл з паролем → пробуємо 2FA
                     if os.path.exists(password_file):
                         try:
                             with open(password_file, "r", encoding="utf-8") as f:
                                 password = f.read().strip()
                             await client.start(password=password)
                             logger.info(f"Client for {session_path} authorized with 2FA.")
+                            active_clients[account_id] = client  # Зберігаємо клієнта в активних
                             return client
                         except Exception as e:
                             logger.error(f"Failed 2FA login for {session_path}: {e}")
                             await client.disconnect()
                             return None
                     else:
-                        logger.warning(
-                            f"Skipping account {account_id or session_path}: session not authorized (needs phone/token).")
+                        logger.warning(f"Skipping account {account_id or session_path}: session not authorized.")
                         await client.disconnect()
                         return None
 
-                # ===== Перевіряємо та логуємо зовнішній IP =====
-                try:
-                    r_proxies = proxy_to_requests(proxy)
-                    ip = requests.get("https://api.ipify.org", proxies=r_proxies, timeout=15).text
-                    logger.info(f"External IP for account {account_id or '?'}: {ip}")
-                except Exception as e:
-                    logger.error(f"Failed to fetch external IP: {e}")
-
                 logger.info(f"Client for {session_path} is authorized.")
+                active_clients[account_id] = client  # Зберігаємо клієнта в активних
                 return client
 
             except sqlite3.OperationalError as e:
@@ -200,15 +206,6 @@ async def get_client(session_path, account_id=None, proxy=None):
 
             except Exception as e:
                 logger.error(f"Failed to connect to {session_path}: {type(e).__name__}: {e}")
-                if "proxy" in str(e).lower() or "authentication methods were rejected" in str(e).lower():
-                    if proxy and proxy_index < len(proxies) - 1:
-                        logger.warning(f"Proxy {proxy} failed. Trying next proxy...")
-                        proxy_index += 1
-                        proxy = get_single_proxy(proxy_index)
-                        continue
-                    logger.warning(f"Proxy {proxy} failed. Retrying without proxy.")
-                    proxy = None
-                    continue
                 if 'client' in locals() and client.is_connected():
                     await client.disconnect()
                 if attempt < max_retries - 1:
@@ -244,7 +241,8 @@ async def load_existing_sessions():
             client = await get_client(session_path, account_id, proxy)
             if client:
                 try:
-                    await client.connect()
+                    if not await client.is_connected():
+                        await client.connect()
                     if await client.is_user_authorized():
                         me = await client.get_me()
                         phone = me.phone or "Unknown"

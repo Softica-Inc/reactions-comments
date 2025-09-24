@@ -25,6 +25,7 @@ from config import REACTION_DELAY_MIN, REACTION_DELAY_MAX, MAX_COMMENTING_ACCOUN
 from utils import logger, normalize_chat_id, normalize_emoji, get_single_proxy, generate_comments_binary_options
 from telegram_client import get_client, client_connection_lock, view_post, test_proxy
 from database import with_db_connection, get_comments, get_settings
+from telethon.utils import get_peer_id as make_peer
 
 class AutoManager:
     def __init__(self):
@@ -43,49 +44,21 @@ class AutoManager:
         self.comment_usage = {}  # {chat_id: count}
         self.used_comments = set()  # {(chat_id, "comment text")}
 
-    # async def start_clients(self):
-    #     self.processed_messages.clear()
-    #     accounts = await with_db_connection("SELECT id, session_path, proxy FROM accounts", fetchall=True)
-    #     logger.info(f"Starting {len(accounts)} clients")
-    #     if not accounts:
-    #         logger.warning("No accounts found in database to start.")
-    #         return
-    #     single_proxy = get_single_proxy()
-    #     if single_proxy and not await test_proxy(single_proxy):
-    #         logger.error("Single proxy is not working. Clients will start without proxy.")
-    #         single_proxy = None
-    #
-    #     for account_id, session_path, proxy_str in accounts:
-    #         if not os.path.exists(session_path):
-    #             logger.warning(f"Session file {session_path} for account {account_id} does not exist")
-    #             continue
-    #         async with client_connection_lock:
-    #             client = await get_client(session_path, account_id, single_proxy)
-    #             if client:
-    #                 self.clients[account_id] = client
-    #                 await self.update_event_handlers(account_id)
-    #                 if not self.tasks:
-    #                     self.tasks["reaction_processor"] = asyncio.create_task(self.process_reactions())
-    #                     self.tasks["comment_processor"] = asyncio.create_task(self.process_comments())
-    #                     self.tasks["poll_processor"] = asyncio.create_task(self.process_polls())
-    #                     self.tasks["view_processor"] = asyncio.create_task(self.process_views())
-    #                 logger.info(f"Started client for account {account_id} successfully")
-    #                 await asyncio.sleep(2)
-    #             else:
-    #                 logger.warning(f"Failed to start client for account {account_id}")
-    #     logger.info(f"Completed starting clients. Active clients: {len(self.clients)}")
-
     async def start_clients(self):
         from telethon.errors import RPCError
         self.processed_messages.clear()
+
+        # Отримуємо всі акаунти, які не заблоковані
         accounts = await with_db_connection(
             "SELECT id, session_path, proxy FROM accounts WHERE banned IS NULL OR banned = 0", fetchall=True)
         logger.info(f"Starting {len(accounts)} non-banned clients")
+
         if not accounts:
             logger.warning("No non-banned accounts found in database to start.")
             return
 
         for account_id, session_path, proxy_str in accounts:
+            # Якщо сесія не існує, видаляємо акаунт та підписки з бази даних
             if not os.path.exists(session_path):
                 logger.warning(f"Session file {session_path} for account {account_id} does not exist")
                 await with_db_connection("DELETE FROM accounts WHERE id = ?", (account_id,))
@@ -93,31 +66,39 @@ class AutoManager:
                 logger.info(f"Deleted account {account_id} and its subscriptions due to missing session file")
                 continue
 
-            # Use account_id as index for cyclic proxy assignment
+            # Призначаємо проксі для акаунта
             proxy = get_single_proxy(account_id)
             if proxy and not await test_proxy(proxy):
                 logger.error(f"Proxy {proxy} for account {account_id} is not working. Skipping.")
                 continue
 
-            async with client_connection_lock:
+            # Блокуємо доступ до клієнтів під час підключення
+            async with client_connection_lock:  # Блокування доступу до клієнта
                 try:
+                    # Отримуємо клієнта з бази даних та перевіряємо, чи він успішно підключений
                     client = await get_client(session_path, account_id, proxy)
                     if client:
+                        # Якщо клієнт успішно підключений, зберігаємо його в словнику клієнтів
                         self.clients[account_id] = client
                         await self.update_event_handlers(account_id)
+
+                        # Якщо задачі ще не створені, створюємо їх
                         if not self.tasks:
                             self.tasks["reaction_processor"] = asyncio.create_task(self.process_reactions())
                             self.tasks["comment_processor"] = asyncio.create_task(self.process_comments())
                             self.tasks["poll_processor"] = asyncio.create_task(self.process_polls())
                             self.tasks["view_processor"] = asyncio.create_task(self.process_views())
+
                         logger.info(f"Started client for account {account_id} successfully")
                         await asyncio.sleep(2)
                     else:
+                        # Якщо клієнт не підключений, видаляємо акаунт і його підписки з бази
                         logger.warning(f"Failed to start client for account {account_id}")
                         await with_db_connection("DELETE FROM accounts WHERE id = ?", (account_id,))
                         await with_db_connection("DELETE FROM subscriptions WHERE account_id = ?", (account_id,))
                         logger.info(f"Deleted account {account_id} and its subscriptions due to failed initialization")
                 except (UserDeactivatedError, AuthKeyDuplicatedError, PhoneNumberBannedError, RPCError) as e:
+                    # Якщо клієнт заблокований або виникла інша помилка
                     if isinstance(e, RPCError) and (
                             "FROZEN_METHOD_INVALID" in str(e) or "FROZEN_PARTICIPANT_MISSING" in str(e)):
                         logger.warning(
@@ -130,9 +111,12 @@ class AutoManager:
                         await with_db_connection("DELETE FROM accounts WHERE id = ?", (account_id,))
                         await with_db_connection("DELETE FROM subscriptions WHERE account_id = ?", (account_id,))
                         logger.info(f"Deleted account {account_id} and its subscriptions due to {str(e)}")
+
+                    # Відключаємо клієнта, якщо він був підключений
                     if 'client' in locals() and client and client.is_connected():
                         await client.disconnect()
 
+            # Після обробки всіх акаунтів виводимо загальний статус
         logger.info(f"Completed starting clients. Active clients: {len(self.clients)}")
 
     # async def update_event_handlers(self, account_id=None):
@@ -286,15 +270,12 @@ class AutoManager:
     #         await self._process_action(account_id, chat_id, msg_id, "comment", comment)
 
     async def process_comments(self):
-        # Для кожного поста тримаємо "хвіст часу", коли можна наступний комент
         next_available_time = defaultdict(lambda: 0)
 
         while self.running:
             try:
                 account_id, chat_id, msg_id, comment, delay = await self.comment_queue.get()
                 key = (chat_id, msg_id)
-
-                # розрахунок часу старту: максимум між "зараз + delay" та "останній комент + інтервал"
                 start_time = max(
                     asyncio.get_event_loop().time() + delay,
                     next_available_time[key]
@@ -311,9 +292,20 @@ class AutoManager:
                             await asyncio.sleep(wait_time)
 
                         client = self.clients.get(account_id)
+
+                        # Якщо клієнт не знайдений або не підключений, пробуємо реконектити
                         if not client or not client.is_connected():
-                            logger.warning(f"Skipping comment for inactive account {account_id}")
-                            return
+                            logger.warning(f"Account {account_id} not connected. Attempting to reconnect.")
+                            try:
+                                # Спроба реконекту клієнта
+                                await client.connect()
+                                if not await client.is_user_authorized():
+                                    logger.warning(f"Account {account_id} could not reconnect (not authorized).")
+                                    return
+                                logger.info(f"Account {account_id} reconnected successfully.")
+                            except Exception as reconnect_error:
+                                logger.warning(f"Failed to reconnect account {account_id}: {reconnect_error}")
+                                return
 
                         async with self.global_rate_semaphore:
                             await asyncio.sleep(random.uniform(0.1, 0.3))
@@ -332,8 +324,6 @@ class AutoManager:
 
                     except Exception as e:
                         logger.error(f"Comment error for {account_id} on {chat_id}/{msg_id}: {e}")
-
-                # Використовуємо поточний delay як spacing
                 spacing = delay
                 next_available_time[key] = start_time + spacing
 
@@ -560,8 +550,23 @@ class AutoManager:
 
                 async def do_view(acc_id=account_id):
                     await asyncio.sleep(random.uniform(0.5, 2))
+
+                    client = self.clients.get(acc_id)
+                    if not client or not client.is_connected():
+                        logger.warning(f"Client not active for account {acc_id}, attempting to reconnect.")
+                        try:
+                            # Спроба реконекту
+                            await client.connect()
+                            if not await client.is_user_authorized():
+                                logger.warning(f"Account {acc_id} could not reconnect (not authorized).")
+                                return
+                            logger.info(f"Account {acc_id} reconnected successfully.")
+                        except Exception as reconnect_error:
+                            logger.warning(f"Failed to reconnect account {acc_id}: {reconnect_error}")
+                            return  # Не продовжуємо, якщо реконект не вдався
+
                     try:
-                        await self.clients[acc_id](GetMessagesViewsRequest(
+                        await client(GetMessagesViewsRequest(
                             peer=int(f"-100{chat_id}"),
                             id=[msg_id],
                             increment=True
@@ -580,41 +585,6 @@ class AutoManager:
                         logger.error(f"View error for {acc_id} on {chat_id}/{msg_id}: {e}")
 
                 asyncio.create_task(do_view())
-
-        #  # ===== Auto-reactions =====
-        # reaction_data = await with_db_connection(
-        #     "SELECT reaction FROM auto_reactions WHERE chat_id = ?",
-        #     (chat_id,),
-        #     fetchone=True
-        # )
-        #
-        # if reaction_data:
-        #     reaction_str = reaction_data[0]  # замість reaction_data[0][0]
-        #     reactions = [normalize_emoji(r.strip()) for r in reaction_str.split(",") if r.strip()]
-        #     num_reactions = min(settings['max_accounts'], len(all_accounts))
-        #     # reaction_accounts = random.sample(all_accounts, num_reactions) if all_accounts else []
-        #     reaction_accounts = [acc_id for (acc_id,) in all_accounts if acc_id in self.clients]
-        #
-        #     # for (account_id,) in reaction_accounts:
-        #     #     if account_id in self.clients:
-        #     #         reaction = random.choice(reactions)
-        #     #         reaction_key = f"{account_id}:{chat_id}:{msg_id}:reaction"
-        #     #         async with self.message_lock:
-        #     #             if reaction_key in self.processed_messages:
-        #     #                 continue
-        #     #             self.processed_messages.add(reaction_key)
-        #     #         logger.info(f"Queuing auto-reaction '{reaction}' for {chat_id}/{msg_id} with account {account_id}")
-        #     #         await self.reaction_queue.put((account_id, chat_id, msg_id, reaction))
-        #     for account_id in reaction_accounts:  # <-- тут без розпаковки
-        #         if account_id in self.clients:
-        #             reaction = random.choice(reactions)
-        #             reaction_key = f"{account_id}:{chat_id}:{msg_id}:reaction"
-        #             async with self.message_lock:
-        #                 if reaction_key in self.processed_messages:
-        #                     continue
-        #                 self.processed_messages.add(reaction_key)
-        #             logger.info(f"Queuing auto-reaction '{reaction}' for {chat_id}/{msg_id} with account {account_id}")
-        #             await self.reaction_queue.put((account_id, chat_id, msg_id, reaction))
         # ===== Auto-reactions =====
         reaction_data = await with_db_connection(
             "SELECT reaction FROM auto_reactions WHERE chat_id = ?",
@@ -623,7 +593,7 @@ class AutoManager:
         )
 
         if reaction_data:
-            reaction_str = reaction_data[0]  # тепер може містити mode=random або mode=manual
+            reaction_str = reaction_data[0]
             reaction_accounts = [acc_id for (acc_id,) in all_accounts if acc_id in self.clients]
 
             if reaction_str.startswith("mode=manual;"):
@@ -638,8 +608,6 @@ class AutoManager:
                     elif ":" in p:
                         emoji, num = p.split(":")
                         counts[normalize_emoji(emoji.strip())] = int(num.strip())
-
-                # формуємо список з потрібною кількістю реакцій
                 assigned = []
                 for emoji, num in counts.items():
                     assigned.extend([emoji] * num)
@@ -686,181 +654,6 @@ class AutoManager:
                     )
                     await self.reaction_queue.put((account_id, chat_id, msg_id, reaction))
 
-
-        # # ===== Auto-comments =====
-        # comments = await get_next_comments(chat_id, settings['comment_count'])
-        # if comments and event.message.replies and event.message.replies.comments:
-        #     max_possible_accounts = min(settings['max_accounts'], len(all_accounts))
-        #     num_accounts_to_use = random.randint(1, max_possible_accounts) if max_possible_accounts > 0 else 0
-        #     comment_accounts = random.sample([aid[0] for aid in all_accounts],
-        #                                      num_accounts_to_use) if all_accounts else []
-        #     num_comments_needed = min(settings['comment_count'], len(comments), len(comment_accounts))
-        #     logger.info(
-        #         f"Preparing to queue {num_comments_needed} comments for chat {chat_id}/msg {msg_id} "
-        #         f"with {len(comment_accounts)} selected accounts (out of {len(all_accounts)} available, "
-        #         f"active clients: {len(self.clients)})")
-        #     if num_comments_needed > 0:
-        #         if len(comments) < num_comments_needed:
-        #             unique_comments = [random.choice(comments) for _ in range(num_comments_needed)]
-        #         else:
-        #             unique_comments = random.sample(comments, num_comments_needed)
-        #
-        #         comment_accounts = comment_accounts[:num_comments_needed]
-        #         for idx, account_id in enumerate(comment_accounts):
-        #             if account_id in self.clients:
-        #                 comment = unique_comments[idx]
-        #                 comment_key = f"{account_id}:{chat_id}:{msg_id}:comment"
-        #                 async with self.message_lock:
-        #                     if comment_key in self.processed_messages:
-        #                         logger.warning(
-        #                             f"Skipping duplicate comment for account {account_id} on {chat_id}/{msg_id}")
-        #                         continue
-        #                     self.processed_messages.add(comment_key)
-        #                 logger.info(f"Queuing comment '{comment}' for account {account_id} on {chat_id}/{msg_id}")
-        #                 await self.comment_queue.put((account_id, chat_id, msg_id, comment))
-        #             else:
-        #                 logger.warning(
-        #                     f"Skipping comment for account {account_id} on {chat_id}/{msg_id}: no active client")
-
-        # # ===== Auto-comments =====
-        # comments = await get_next_comments(chat_id, settings['comment_count'])
-        # if comments and event.message.replies and event.message.replies.comments:
-        #     if all_accounts:
-        #         num_accounts_to_use = random.randint(1, len(all_accounts))
-        #         comment_accounts = random.sample([aid[0] for aid in all_accounts], num_accounts_to_use)
-        #     else:
-        #         comment_accounts = []
-        #
-        #     num_comments_needed = min(settings['comment_count'], len(comments), len(comment_accounts))
-        #     logger.info(
-        #         f"Preparing to queue {num_comments_needed} comments for chat {chat_id}/msg {msg_id} "
-        #         f"with {len(comment_accounts)} selected accounts (out of {len(all_accounts)} available, "
-        #         f"active clients: {len(self.clients)})")
-        #
-        #     if num_comments_needed > 0:
-        #         if len(comments) < num_comments_needed:
-        #             unique_comments = [random.choice(comments) for _ in range(num_comments_needed)]
-        #         else:
-        #             unique_comments = random.sample(comments, num_comments_needed)
-        #
-        #         comment_accounts = comment_accounts[:num_comments_needed]
-        #         for idx, account_id in enumerate(comment_accounts):
-        #             if account_id in self.clients:
-        #                 comment = unique_comments[idx]
-        #                 comment_key = f"{account_id}:{chat_id}:{msg_id}:comment"
-        #                 async with self.message_lock:
-        #                     if comment_key in self.processed_messages:
-        #                         logger.warning(
-        #                             f"Skipping duplicate comment for account {account_id} on {chat_id}/{msg_id}")
-        #                         continue
-        #                     self.processed_messages.add(comment_key)
-        #                 logger.info(f"Queuing comment '{comment}' for account {account_id} on {chat_id}/{msg_id}")
-        #                 await self.comment_queue.put((account_id, chat_id, msg_id, comment))
-        #             else:
-        #                 logger.warning(
-        #                     f"Skipping comment for account {account_id} on {chat_id}/{msg_id}: no active client")
-
-        # ===== Auto-comments =====
-        # if all_accounts and event.message.replies and event.message.replies.comments:
-        #     num_accounts_to_use = random.randint(1, len(all_accounts))
-        #     shuffled_accounts = [aid[0] for aid in all_accounts]
-        #     random.shuffle(shuffled_accounts)
-        #     comment_accounts = shuffled_accounts[:num_accounts_to_use]
-        #
-        #     comments = await get_next_comments(chat_id, num_accounts_to_use)
-        #
-        #     num_comments_needed = min(len(comment_accounts), len(comments))
-        #
-        #     logger.info(
-        #         f"Preparing to queue {num_comments_needed} comments for chat {chat_id}/msg {msg_id} "
-        #         f"from {len(comment_accounts)} selected accounts (total accounts: {len(all_accounts)}, "
-        #         f"active clients: {len(self.clients)})"
-        #     )
-        #
-        #     for idx in range(num_comments_needed):
-        #         account_id = comment_accounts[idx]
-        #         comment = comments[idx]
-        #
-        #         if account_id in self.clients:
-        #             comment_key = f"{account_id}:{chat_id}:{msg_id}:comment"
-        #             async with self.message_lock:
-        #                 if comment_key in self.processed_messages:
-        #                     logger.warning(
-        #                         f"Skipping duplicate comment for account {account_id} on {chat_id}/{msg_id}")
-        #                     continue
-        #                 self.processed_messages.add(comment_key)
-        #
-        #             logger.info(f"Queuing comment '{comment}' for account {account_id} on {chat_id}/{msg_id}")
-        #             await self.comment_queue.put((account_id, chat_id, msg_id, comment))
-        #         else:
-        #             logger.warning(
-        #                 f"Skipping comment for account {account_id} on {chat_id}/{msg_id}: no active client")
-
-
-        # # ===== Auto-comments (паралельні) =====
-        # if all_accounts and event.message.replies and event.message.replies.comments:
-        #     num_accounts_to_use = random.randint(1, len(all_accounts))
-        #     shuffled_accounts = [aid[0] for aid in all_accounts]
-        #     random.shuffle(shuffled_accounts)
-        #     comment_accounts = shuffled_accounts[:num_accounts_to_use]
-        #
-        #     comments = await get_next_comments(chat_id, 50)  # 50 або будь-яке достатньо велике число
-        #     num_comments_needed = min(len(comment_accounts), len(comments))
-        #     comments = random.sample(comments, num_comments_needed)
-        #
-        #     logger.info(
-        #         f"Preparing to send {num_comments_needed} parallel comments for chat {chat_id}/msg {msg_id} "
-        #         f"from {len(comment_accounts)} selected accounts"
-        #     )
-        #
-        #     for idx in range(num_comments_needed):
-        #         account_id = comment_accounts[idx]
-        #         comment = comments[idx]
-        #
-        #         if account_id in self.clients:
-        #             comment_key = f"{account_id}:{chat_id}:{msg_id}:comment"
-        #             async with self.message_lock:
-        #                 if comment_key in self.processed_messages:
-        #                     logger.warning(
-        #                         f"Skipping duplicate comment for account {account_id} on {chat_id}/{msg_id}")
-        #                     continue
-        #                 self.processed_messages.add(comment_key)
-        #
-        #             async def delayed_comment(acc_id=account_id, c=comment, pos=idx):
-        #                 try:
-        #                     base_delay = random.uniform(
-        #                         settings['comment_delay_min'],
-        #                         settings['comment_delay_max']
-        #                     )
-        #                     # Додаємо зсув залежно від позиції комента
-        #                     extra_delay = pos * random.uniform(3.5, 9.5)
-        #
-        #                     total_delay = base_delay + extra_delay
-        #                     logger.info(
-        #                         f"Delaying comment for {total_delay:.2f}s (base={base_delay:.2f}, extra={extra_delay:.2f}) "
-        #                         f"acc={acc_id} chat={chat_id} msg={msg_id}"
-        #                     )
-        #                     await asyncio.sleep(total_delay)
-        #
-        #                     client = self.clients.get(acc_id)
-        #                     if client and client.is_connected():
-        #                         entity = await client.get_entity(make_peer(chat_id))
-        #                         await client.send_message(entity, c, comment_to=msg_id)
-        #                         logger.info(f"Commented '{c}' on {chat_id}/{msg_id} with account {acc_id}")
-        #                         await with_db_connection(
-        #                             "INSERT INTO history (account_id, action, details, timestamp) VALUES (?, ?, ?, ?)",
-        #                             (acc_id, "auto_comment", f"Commented '{c}' on {chat_id}/{msg_id}",
-        #                              datetime.now().isoformat())
-        #                         )
-        #                 except Exception as e:
-        #                     logger.error(f"Failed comment for {acc_id} on {chat_id}/{msg_id}: {e}")
-        #
-        #             asyncio.create_task(delayed_comment())
-        #         else:
-        #             logger.warning(
-        #                 f"Skipping comment for account {account_id} on {chat_id}/{msg_id}: no active client"
-        #             )
-
         # ===== Auto-comments через чергу =====
         if all_accounts and event.message.replies and event.message.replies.comments:
             num_accounts_to_use = random.randint(1, len(all_accounts))
@@ -880,8 +673,6 @@ class AutoManager:
             for idx in range(num_comments_needed):
                 account_id = comment_accounts[idx]
                 comment = comments[idx]
-
-                # 🔹 Перевірка унікальності комента
                 if (chat_id, comment) in self.used_comments:
                     logger.info(
                         f"Skipping duplicate comment text '{comment}' for chat {chat_id}, searching replacement..."
@@ -965,7 +756,6 @@ class AutoManager:
 
     def _get_album_root_id(self, grouped_id, msg_id):
         now = time.time()
-        # TTL 10 секунд — після цього вважаємо групу закритою
         ttl = 10
         if grouped_id in self._album_cache:
             root_id, ts = self._album_cache[grouped_id]
